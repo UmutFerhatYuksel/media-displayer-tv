@@ -1,0 +1,30 @@
+{
+  "name": "media-tv-displayer-tv",
+  "version": "0.1.0",
+  "private": true,
+  "main": "index.js",
+  "scripts": {
+    "start": "expo start",
+    "android": "expo run:android",
+    "prebuild": "expo prebuild",
+    "tsc": "tsc --noEmit",
+    "ios": "expo run:ios"
+  },
+  "dependencies": {
+    "@react-native-async-storage/async-storage": "2.2.0",
+    "expo": "~54.0.0",
+    "react": "19.1.0",
+    "react-native": "npm:react-native-tvos@0.81.5-2",
+    "react-native-qrcode-svg": "^6.3.21",
+    "react-native-svg": "^15.15.5",
+    "react-native-video": "^6.19.2"
+  },
+  "devDependencies": {
+    "@react-native-tvos/config-tv": "^0.1.6",
+    "@types/react": "^19.1.0",
+    "typescript": "^5.5.4"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

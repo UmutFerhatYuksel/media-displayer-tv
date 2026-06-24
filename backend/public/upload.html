@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>TV'ye Medya Gönder</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      background: hsl(20 35% 8%); color: hsl(30 25% 96%); min-height: 100vh;
+      display: flex; flex-direction: column; align-items: center; padding: 24px;
+    }
+    h1 { font-size: 20px; margin: 8px 0 4px; }
+    h1 .brand { color: hsl(22 85% 60%); }
+    p.sub { color: hsl(30 15% 65%); margin: 0 0 24px; font-size: 14px; }
+    .card {
+      width: 100%; max-width: 480px; background: hsl(20 30% 11%); border: 1px solid hsl(30 15% 20%);
+      border-radius: 18px; padding: 20px;
+    }
+    label.pick {
+      display: block; text-align: center; padding: 28px; border: 2px dashed hsl(30 15% 28%);
+      border-radius: 14px; cursor: pointer; color: hsl(30 20% 80%); font-size: 16px;
+    }
+    label.pick:active { background: hsl(20 24% 15%); }
+    input[type=file] { display: none; }
+    button {
+      width: 100%; margin-top: 16px; padding: 14px; font-size: 16px; font-weight: 600;
+      background: hsl(22 85% 60%); color: hsl(20 40% 10%); border: 0; border-radius: 14px; cursor: pointer;
+    }
+    button:disabled { background: hsl(20 20% 22%); color: hsl(30 15% 50%); }
+    ul { list-style: none; padding: 0; margin: 16px 0 0; }
+    li { font-size: 13px; padding: 10px 12px; background: hsl(20 24% 15%);
+         border-radius: 10px; margin-bottom: 8px; }
+    .head { display: flex; justify-content: space-between; gap: 8px; align-items: center; }
+    .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .status { font-size: 12px; flex: none; font-variant-numeric: tabular-nums; }
+    .ok { color: hsl(160 55% 50%); } .err { color: hsl(0 70% 60%); } .pending { color: hsl(35 90% 60%); }
+    /* yükleme ilerleme çubuğu */
+    .bar { height: 8px; margin-top: 8px; background: hsl(20 22% 22%); border-radius: 999px; overflow: hidden; }
+    .bar > i { display: block; height: 100%; width: 0%; border-radius: 999px;
+               background: hsl(22 85% 60%); transition: width .15s ease; }
+    .bar.ok > i { background: hsl(160 55% 50%); }
+    .bar.err > i { background: hsl(0 70% 60%); }
+    .note { margin-top: 18px; font-size: 12px; color: hsl(30 15% 65%); text-align: center; }
+  </style>
+</head>
+<body>
+  <h1>📺 TV'ye Medya <span class="brand">Gönder</span></h1>
+  <p class="sub">Seçtiğin foto/videolar TV ekranında dönen listeye eklenir.</p>
+
+  <div class="card">
+    <label class="pick" for="files">
+      📁 Foto / video seç
+      <div id="count" style="margin-top:8px;font-size:13px;color:#64748b"></div>
+    </label>
+    <input id="files" type="file" accept="image/*,video/*" multiple />
+    <button id="send" disabled>Gönder</button>
+    <ul id="list"></ul>
+    <div class="note" id="note"></div>
+  </div>
+
+  <script>
+    const params = new URLSearchParams(location.search);
+    const token = params.get('token');
+    const filesInput = document.getElementById('files');
+    const sendBtn = document.getElementById('send');
+    const list = document.getElementById('list');
+    const count = document.getElementById('count');
+    const note = document.getElementById('note');
+
+    if (!token) {
+      note.textContent = 'Geçersiz bağlantı: token yok. QR kodu TV ekranından tekrar okutun.';
+      note.className = 'note err';
+    }
+
+    let chosen = [];
+    let rows = []; // { file, bar, fill, label }
+    filesInput.addEventListener('change', () => {
+      chosen = Array.from(filesInput.files);
+      count.textContent = chosen.length ? chosen.length + ' dosya seçildi' : '';
+      sendBtn.disabled = chosen.length === 0 || !token;
+      buildRows();
+    });
+
+    // Her dosya için bir satır + ilerleme çubuğu kur (referansları sakla → akıcı güncelleme).
+    function buildRows() {
+      list.innerHTML = '';
+      rows = chosen.map((f) => {
+        const li = document.createElement('li');
+        const head = document.createElement('div'); head.className = 'head';
+        const name = document.createElement('span'); name.className = 'name'; name.textContent = f.name;
+        const label = document.createElement('span'); label.className = 'status pending'; label.textContent = formatSize(f.size);
+        head.append(name, label);
+        const bar = document.createElement('div'); bar.className = 'bar';
+        const fill = document.createElement('i'); bar.appendChild(fill);
+        li.append(head, bar);
+        list.appendChild(li);
+        return { file: f, bar, fill, label };
+      });
+    }
+
+    function setProgress(r, ratio) {
+      const pct = Math.round(ratio * 100);
+      r.fill.style.width = pct + '%';
+      r.label.textContent = pct + '%';
+      r.label.className = 'status pending';
+    }
+    function setDone(r) { r.fill.style.width = '100%'; r.bar.className = 'bar ok'; r.label.textContent = '✓ yüklendi'; r.label.className = 'status ok'; }
+    function setErr(r)  { r.bar.className = 'bar err'; r.label.textContent = '✗ hata'; r.label.className = 'status err'; }
+
+    // Doğrudan R2'ye yükleme: dosya backend/tünelden GEÇMEZ → progress bar gerçek transferi
+    // ölçer ve boyut limiti olmaz. 1) presign → 2) R2'ye PUT → 3) complete (kayıt).
+    async function uploadFile(file, onProgress) {
+      const ctype = file.type || 'application/octet-stream';
+
+      // 1) imzalı PUT URL al
+      const pres = await fetch('/upload/presign', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ token, filename: file.name, contentType: ctype }),
+      });
+      if (!pres.ok) throw new Error('presign ' + pres.status);
+      const { putUrl, key } = await pres.json();
+
+      // 2) dosyayı DOĞRUDAN R2'ye PUT et (gerçek ilerleme)
+      await new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('PUT', putUrl);
+        xhr.setRequestHeader('Content-Type', ctype); // imzalanan değerle birebir aynı olmalı
+        xhr.upload.addEventListener('progress', (e) => { if (e.lengthComputable) onProgress(e.loaded / e.total); });
+        xhr.addEventListener('load', () => (xhr.status >= 200 && xhr.status < 300)
+          ? resolve() : reject(new Error('R2 ' + xhr.status)));
+        xhr.addEventListener('error', () => reject(new Error('R2 baglanti hatasi (CORS?)')));
+        xhr.send(file);
+      });
+
+      // 3) kaydı oluştur
+      const comp = await fetch('/upload/complete', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ token, key, filename: file.name, contentType: ctype, sizeBytes: file.size }),
+      });
+      if (!comp.ok) throw new Error('complete ' + comp.status);
+    }
+
+    sendBtn.addEventListener('click', async () => {
+      sendBtn.disabled = true;
+      let okCount = 0;
+      for (const r of rows) {
+        try {
+          setProgress(r, 0);
+          await uploadFile(r.file, (ratio) => setProgress(r, ratio));
+          setDone(r); okCount++;
+        } catch (e) {
+          setErr(r);
+        }
+      }
+      note.textContent = okCount + ' / ' + rows.length + ' dosya TV listesine eklendi.';
+      note.className = 'note ' + (okCount === rows.length ? 'ok' : 'err');
+      sendBtn.disabled = false;
+    });
+
+    function formatSize(bytes) {
+      if (bytes < 1024) return bytes + ' B';
+      if (bytes < 1048576) return Math.round(bytes / 1024) + ' KB';
+      return (bytes / 1048576).toFixed(1) + ' MB';
+    }
+  </script>
+</body>
+</html>

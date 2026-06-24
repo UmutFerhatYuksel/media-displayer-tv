@@ -1,0 +1,120 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum MediaType {
+  IMAGE
+  VIDEO
+}
+
+enum MediaSource {
+  GOOGLE_PHOTOS
+  GOOGLE_DRIVE
+  UPLOAD
+}
+
+enum MediaStatus {
+  PENDING // R2'ye kopyalama/işleme bekliyor
+  READY   // oynatılabilir
+  FAILED
+}
+
+model User {
+  id        String   @id @default(cuid())
+  googleSub String   @unique // Google hesabının kalıcı kimliği (sub)
+  email     String   @unique
+  name      String?
+  avatarUrl String?
+  createdAt DateTime @default(now())
+
+  googleToken    GoogleToken?
+  mediaItems     MediaItem[]
+  playlists      Playlist[]
+  uploadSessions UploadSession[]
+}
+
+// Google OAuth token'ları. refreshToken ENCRYPTION_KEY ile şifreli saklanır.
+model GoogleToken {
+  id           String    @id @default(cuid())
+  userId       String    @unique
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  refreshToken String // şifreli (iv:tag:ciphertext)
+  accessToken  String? // şifreli; kısa ömürlü cache
+  expiresAt    DateTime?
+  scope        String?
+  updatedAt    DateTime  @updatedAt
+}
+
+model MediaItem {
+  id           String      @id @default(cuid())
+  userId       String
+  user         User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type         MediaType
+  source       MediaSource
+  status       MediaStatus @default(PENDING)
+  r2Key        String? // R2 nesne anahtarı (READY olunca dolu)
+  thumbKey     String? // video önizleme karesi (R2 anahtarı); görsellerde boş
+  originalName String?
+  mimeType     String?
+  sizeBytes    Int?
+  durationSec  Float? // video uzunluğu (sn)
+  width        Int?
+  height       Int?
+  // kaynağa özel referans (Photos mediaItem id / Drive file id) — tekrar import'u önlemek için
+  sourceRef    String?
+  createdAt    DateTime    @default(now())
+
+  playlistItems PlaylistItem[]
+
+  @@index([userId, status])
+  @@unique([userId, source, sourceRef])
+}
+
+model Playlist {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name      String   @default("Varsayılan")
+  isDefault Boolean  @default(true)
+  // Oynatma (loop) ayarları
+  loop             Boolean @default(true) // liste bitince başa dön
+  shuffle          Boolean @default(false) // rastgele sırayla oynat
+  imageDurationSec Int     @default(8) // görsellerin ekranda kalma süresi (sn)
+  createdAt DateTime @default(now())
+
+  items PlaylistItem[]
+
+  @@index([userId])
+}
+
+model PlaylistItem {
+  id          String    @id @default(cuid())
+  playlistId  String
+  playlist    Playlist  @relation(fields: [playlistId], references: [id], onDelete: Cascade)
+  mediaItemId String
+  mediaItem   MediaItem @relation(fields: [mediaItemId], references: [id], onDelete: Cascade)
+  position    Int
+  // görseller için ekranda kalma süresi (sn). Video ise yok sayılır (tam uzunluk oynar).
+  durationSec Int       @default(8)
+
+  @@unique([playlistId, mediaItemId])
+  @@index([playlistId, position])
+}
+
+// QR ile telefondan login'siz yükleme için tek seferlik oturum.
+model UploadSession {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token     String   @unique
+  expiresAt DateTime
+  usedCount Int      @default(0)
+  createdAt DateTime @default(now())
+
+  @@index([token])
+}

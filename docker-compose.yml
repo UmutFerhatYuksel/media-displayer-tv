@@ -1,0 +1,28 @@
+# Lokal geliştirme için PostgreSQL.
+# Başlat:  docker compose up -d
+# Durdur:  docker compose down   (veriyi silmez)
+# Veriyi sıfırla: docker compose down -v
+# name sabit → proje hangi dizinde olursa olsun aynı volume (veri korunur).
+name: media-tv-displayer
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: media-tv-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: mediatv
+      POSTGRES_PASSWORD: mediatv_local_dev
+      POSTGRES_DB: media_tv
+    ports:
+      # 5432 başka bir projece kullanılıyor; host tarafında 5433 kullanıyoruz.
+      - '5433:5432'
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U mediatv -d media_tv']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:

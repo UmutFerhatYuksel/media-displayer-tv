@@ -1,0 +1,18 @@
+{
+  "expo": {
+    "name": "Media TV Displayer",
+    "slug": "media-tv-displayer",
+    "version": "0.1.0",
+    "orientation": "landscape",
+    "newArchEnabled": false,
+    "android": {
+      "package": "com.mediatvdisplayer"
+    },
+    "plugins": [
+      [
+        "@react-native-tvos/config-tv",
+        { "isTV": true, "androidTVBanner": null }
+      ]
+    ]
+  }
+}

@@ -1,0 +1,18 @@
+node_modules/
+dist/
+build/
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store
+coverage/
+# Expo
+.expo/
+# RN / Android
+tv-app/android/.gradle/
+tv-app/android/app/build/
+tv-app/android/local.properties
+tv-app/ios/Pods/
+*.keystore
+!debug.keystore
