@@ -4,7 +4,7 @@
 //   PC'de:  adb -s <box> reverse tcp:4000 tcp:4000   (Metro için de tcp:8081)
 //   Açık IPv4 (127.0.0.1) yaz → adb reverse yalnız IPv4'ü yönlendirdiği için "localhost"
 //   (IPv6 ::1'e çözülüp) bağlanamama sorununu aşar. Firewall'a gerek kalmaz.
-export const API_BASE_URL = 'http://127.0.0.1:4000';
+export const API_BASE_URL = 'http://192.168.0.25:4000';
 
 // Alternatifler:
 //  - Emülatör:                 'http://10.0.2.2:4000'

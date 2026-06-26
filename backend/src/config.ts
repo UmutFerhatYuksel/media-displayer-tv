@@ -6,9 +6,9 @@ const schema = z.object({
   PUBLIC_BASE_URL: z.string().url(),
   DATABASE_URL: z.string().min(1),
   JWT_SECRET: z.string().min(16),
-  ENCRYPTION_KEY: z.string().regex(/^[0-9a-fA-F]{64}$/, 'ENCRYPTION_KEY 64 hex karakter olmalı (32 byte)'),
-  GOOGLE_CLIENT_ID: z.string().min(1),
-  GOOGLE_CLIENT_SECRET: z.string().min(1),
+  // İlk admin'i tohumlamak için (opsiyonel). Doluysa açılışta upsert edilir.
+  ADMIN_BOOTSTRAP_EMAIL: z.string().email().optional(),
+  ADMIN_BOOTSTRAP_PASSWORD: z.string().min(8).optional(),
   R2_ACCOUNT_ID: z.string().min(1),
   R2_ACCESS_KEY_ID: z.string().min(1),
   R2_SECRET_ACCESS_KEY: z.string().min(1),
@@ -24,8 +24,3 @@ if (!parsed.success) {
 }
 
 export const config = parsed.data;
-
-// TV oturumu için istenecek Google scope'ları.
-// Sadece login (hassas olmayan) scope'lar → Google doğrulama/limit derdi yok.
-// Google Photos/Drive import'u ileride eklenirse photoslibrary/drive scope'ları buraya gelir.
-export const GOOGLE_SCOPES = ['openid', 'email', 'profile'];

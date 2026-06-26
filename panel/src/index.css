@@ -1,0 +1,86 @@
+@import '@fontsource/inter/400.css';
+@import '@fontsource/inter/500.css';
+@import '@fontsource/inter/600.css';
+@import '@fontsource/inter/700.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html,
+  body,
+  #root {
+    @apply h-full;
+  }
+  body {
+    @apply bg-bg text-text font-sans antialiased;
+  }
+  * {
+    @apply border-border;
+  }
+  /* Otomatik doldurulan input'larda koyu zemini koru */
+  input:-webkit-autofill {
+    -webkit-text-fill-color: hsl(30 25% 96%);
+    -webkit-box-shadow: 0 0 0 1000px hsl(20 30% 10%) inset;
+  }
+}
+
+@layer components {
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl border border-border bg-surface-2 px-4 py-2 text-sm font-medium text-text transition
+      hover:border-border-strong hover:bg-surface disabled:cursor-default disabled:opacity-50;
+  }
+  .btn-primary {
+    @apply border-transparent bg-primary text-primary-fg shadow-glow hover:bg-primary-hover hover:border-transparent;
+  }
+  .btn-danger {
+    @apply border-border bg-transparent text-danger hover:border-danger/40 hover:bg-danger/10;
+  }
+  .btn-ghost {
+    @apply border-transparent bg-transparent text-muted hover:bg-surface-2 hover:text-text;
+  }
+  .btn-sm {
+    @apply px-2.5 py-1.5 text-xs;
+  }
+  .input {
+    @apply w-full rounded-xl border border-border bg-surface px-3.5 py-2.5 text-sm text-text outline-none transition
+      placeholder:text-muted/60 focus:border-primary/60 focus:ring-2 focus:ring-primary/20;
+  }
+  .label {
+    @apply mb-1.5 block text-[13px] font-medium text-muted;
+  }
+  .card {
+    @apply rounded-2xl border border-border bg-surface p-5 shadow-card;
+  }
+  .badge {
+    @apply inline-flex items-center gap-1 rounded-full border border-border px-2.5 py-0.5 text-xs text-muted;
+  }
+}
+
+/* TV önizlemesindeki kayan yazı (marquee) */
+@keyframes marquee {
+  from { transform: translateX(100%); }
+  to { transform: translateX(-100%); }
+}
+.marquee-track {
+  display: inline-block;
+  white-space: nowrap;
+  animation: marquee 12s linear infinite;
+}
+
+/* Custom scrollbar (koyu tema) */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: hsl(28 18% 22%);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: hsl(28 20% 30%);
+  background-clip: content-box;
+}

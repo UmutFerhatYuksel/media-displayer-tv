@@ -2,80 +2,99 @@
 
 ## Genel görünüm
 
+Merkezi yönetimli dijital tabela (digital signage) sistemi. Yönetici bir **panelden**
+klinik ekler, her klinik içine **cihaz** (TV/ekran) bağlar ve cihazlara **galeri** atar.
+TV ince bir oynatıcıdır: yalnızca atanan galeriyi loop oynatır.
+
 ```
-┌─────────────────────────────┐
-│        TV App (RN tvos)      │
-│  • Google device-flow login  │     ┌──────────────┐
-│  • Photos/Drive'dan seç      │────►│  Backend API │────► Cloudflare R2
-│  • QR göster (telefon yükler) │     │  Express+TS  │      (medya dosyaları)
-│  • Loop oynatıcı (R2'den)    │◄────│  Prisma      │────► PostgreSQL
-└─────────────────────────────┘     └──────┬───────┘
-                                            ├──► Google OAuth (device flow)
-   ┌──────────────────┐                     ├──► Google Photos Library API
-   │ Telefon (QR'dan) │────────────────────►┤    Google Drive API
-   │  upload.html     │   tek seferlik token │
-   └──────────────────┘
+┌──────────────────────────┐        ┌──────────────┐
+│   Admin Paneli (web)     │───────►│  Backend API │────► Cloudflare R2
+│  • login (email/şifre)   │        │  Express+TS  │      (medya dosyaları)
+│  • klinik/cihaz/galeri   │◄───────│  Prisma      │────► PostgreSQL
+│  • medya upload (R2)     │        └──────┬───────┘
+└──────────────────────────┘               │ cihaz token'ı
+                                            ▼
+┌──────────────────────────┐        ┌──────────────┐
+│   TV App (RN tvos)       │───────►│  /device/*   │
+│  • eşleştirme kodu göster │◄───────│  pair/poll   │
+│  • galeriyi loop oynat   │        │  playlist    │
+└──────────────────────────┘        └──────────────┘
 ```
 
-**İlke:** TV app ince; tüm Google API ve depolama işleri backend'de. TV yalnızca
-kendi backend'imizle konuşur, böylece OAuth sırları sunucuda kalır.
+**İlke:** TV pasif ekran; tüm yönetim panelden. Cihazlar yalnızca kendi backend'imizle
+konuşur ve sadece kendilerine atanan içeriği görür.
+
+## Hiyerarşi (veri modeli)
+
+```
+Admin (panel login)                          MediaItem (R2'de dosya, klinik havuzu)
+                                                  ▲ GalleryItem ile kullanılır
+Clinic ──┬── Device ── ownGallery (DEVICE) ──────┤
+         │      └────── sharedGallery (SHARED) ──┘
+         └── Gallery (SHARED | DEVICE)
+```
+
+- **Admin** — `email`, `passwordHash`, `name`. Çoklu admin; hepsi tüm klinikleri yönetir.
+- **Clinic** — `name`, `address?`. Yönetici elle ekler.
+- **Device** — `clinicId?`, `name`, `status` (UNPAIRED|PAIRED), `pairingCode?`,
+  `pairingSecret?`, `ownGalleryId?`, `sharedGalleryId?`, `lastSeenAt`. Fiziksel TV.
+- **Gallery** — `clinicId`, `kind` (DEVICE|SHARED), `name`, `loop`, `shuffle`,
+  `imageDurationSec`. Sıralı medya koleksiyonu.
+- **GalleryItem** — `galleryId`, `mediaItemId`, `position`, `durationSec`.
+- **MediaItem** — `clinicId`, `type` (IMAGE|VIDEO), `r2Key`, `thumbKey?`, `mimeType`,
+  `sizeBytes`, `contentHash` (klinik içi dedup), `status`. Yalnızca panelden R2 upload.
 
 ## Kimlik doğrulama
 
-### TV'de giriş — Google OAuth Device Flow
-Android TV'de klavye zahmetli olduğu için Google'ın
-"OAuth 2.0 for TV and Limited-Input Devices" akışını kullanırız:
+İki JWT türü, tek `JWT_SECRET`:
+- **Admin oturumu** (`kind: 'admin'`, 7 gün) — panel login (`POST /admin/auth/login`,
+  bcrypt). `requireAdmin` middleware.
+- **Cihaz token'ı** (`kind: 'device'`, süresiz) — eşleştirme sonunda verilir.
+  `requireDevice` middleware.
 
-1. TV → `POST /auth/device/start` → backend Google'dan `device_code` + `user_code` alır,
-   TV'ye `user_code` ("ABCD-1234") ve `verification_url` döner.
-2. TV ekranda gösterir; kullanıcı telefondan `google.com/device` → kodu girer → onaylar.
-3. TV → `POST /auth/device/poll` ile bekler; onay gelince backend `access_token` +
-   `refresh_token` alır, `User` kaydını upsert eder, **kendi JWT'mizi** TV'ye döner.
-4. TV bu JWT'yi saklar; sonraki tüm isteklerde `Authorization: Bearer <jwt>` gönderir.
+İlk admin `ADMIN_BOOTSTRAP_EMAIL`/`_PASSWORD` ile açılışta upsert edilir.
 
-Google `refresh_token` veritabanında (şifreli) saklanır — Photos/Drive'a backend bu
-token'la erişir. TV bizim JWT'mizi kullanır, Google token'ını asla görmez.
+## Cihaz eşleştirme (TV kod gösterir → panelden bağlanır)
 
-İstenen scope'lar: `openid email profile`,
-`https://www.googleapis.com/auth/photoslibrary.readonly`,
-`https://www.googleapis.com/auth/drive.readonly`.
-
-## Medya girişi (iki yol)
-
-### A) Google Photos / Drive'dan seçme
-1. TV → `GET /google/photos/albums` veya `/google/drive/files` → backend kullanıcının
-   token'ıyla listeyi getirir.
-2. Kullanıcı seçer → TV → `POST /media/import` (kaynak + id listesi).
-3. Backend her öğeyi Google'dan indirip **R2'ye** koyar, `MediaItem` kaydı oluşturur
-   (tip, boyut, süre/oran, R2 key). İndirme async kuyrukta da olabilir.
-
-### B) Telefondan QR ile yükleme
-1. TV → `POST /upload/session` → tek seferlik token + URL döner; TV bunu **QR** yapar.
-2. Kullanıcı telefonuyla QR'ı okutur → `upload.html?token=...` açılır (login yok).
-3. Sayfa dosyaları → `POST /upload/file` (token'lı) → backend doğrudan R2'ye yazar,
-   `MediaItem` oluşturur ve oturumun sahibine bağlar.
-4. Oturum süreli ve tek kullanıcılıktır; medya o TV kullanıcısının hesabına düşer.
+1. TV → `POST /device/pair/start` → backend UNPAIRED bir `Device` + 6 haneli `pairingCode`
+   oluşturur; TV'ye `{ deviceId, pairingCode, pairingSecret }` döner. TV kodu saklar (yeniden
+   açılışta aynı kod) ve ekranda gösterir.
+2. TV → `POST /device/pair/poll` (deviceId + pairingSecret) ile bekler.
+3. Admin panelde **kodu girer** → cihaz kliniğe bağlanır, isim verilir, **cihaza özel galeri
+   otomatik açılır**, istenirse ortak galeri atanır → `status=PAIRED`. (`POST /devices/bind`)
+4. TV'nin poll'u `cihaz token'ı` döner. TV saklar; `pairingCode` temizlenir (tekrar
+   bağlanamaz).
 
 ## Oynatma
 
-- TV → `GET /playlist` → sıralı `MediaItem` listesi + her biri için R2 **signed URL**
-  (kısa ömürlü) + görsel süresi.
+- TV → `GET /device/playlist?rev=<son revision>` → atanan **ortak galeri + cihaza özel
+  galeri** öğeleri arka arkaya, her biri için kısa ömürlü R2 **signed URL** + süre.
+- **Koşullu poll:** içerik değişmediyse backend `{ unchanged: true }` döner (signed URL
+  üretmez) → gereksiz iş yapılmaz. `revision` öğe id'leri + süreleri üzerinden hesaplanır.
 - TV listeyi sırayla oynatır: görsel `durationSec` kadar, video tam uzunluk; sona gelince
-  başa döner (loop). Liste değişimini periyodik poll veya (ileride) websocket/SSE ile alır.
-- Signed URL süresi dolmadan TV yeniler.
+  başa döner (loop). 1 dk'da bir içerik/URL yeniler + `POST /device/heartbeat` ile canlılık
+  bildirir. Cihaz panelden çözülürse playlist `409` döner → TV eşleştirme ekranına döner.
 
-## Veri modeli (Prisma)
+## Medya girişi (panelden R2'ye)
 
-- **User** — `id`, `googleSub`, `email`, `name`, `avatarUrl`.
-- **GoogleToken** — `userId`, şifreli `refreshToken`, `accessToken`, `expiresAt`, `scope`.
-- **MediaItem** — `id`, `userId`, `type` (IMAGE|VIDEO), `r2Key`, `originalName`,
-  `mimeType`, `sizeBytes`, `durationSec?`, `width?`, `height?`, `source`
-  (GOOGLE_PHOTOS|GOOGLE_DRIVE|UPLOAD), `status` (PENDING|READY|FAILED).
-- **Playlist** — `id`, `userId`, `name`, `isDefault`.
-- **PlaylistItem** — `id`, `playlistId`, `mediaItemId`, `position`, `durationSec`
-  (görsel süresi override).
-- **UploadSession** — `id`, `userId`, `token`, `expiresAt`, `usedCount`.
-- **DeviceSession** (ops.) — TV başına oturum/refresh takibi.
+- **Küçük dosya:** `POST /media/upload` (multipart, gövde backend'den geçer). İçerik hash'i
+  ile klinik içi dedup.
+- **Büyük video:** `POST /media/presign` → imzalı PUT URL → panel doğrudan R2'ye yükler →
+  `POST /media/complete` ile `MediaItem` oluşur (video ise önizleme karesi üretilir).
+
+## API yüzeyi
+
+| Yol | Auth | Açıklama |
+|-----|------|----------|
+| `POST /admin/auth/login` `register` `GET /me` | — / admin | Panel oturumu |
+| `GET/POST/PATCH/DELETE /clinics` | admin | Klinik CRUD |
+| `GET /clinics/:id` | admin | Klinik detayı (cihaz+galeri) |
+| `POST /galleries` `GET/PATCH/DELETE /galleries/:id` | admin | Galeri + ayarlar |
+| `.../items` `/reorder` `/items/:id/duration` | admin | Galeri içeriği |
+| `POST /devices/bind` `PATCH/DELETE /devices/:id` | admin | Cihaz bağlama/atama |
+| `GET/POST/DELETE /media` `/upload` `/presign` `/complete` | admin | Medya havuzu |
+| `POST /device/pair/start` `pair/poll` | — | Eşleştirme |
+| `GET /device/playlist` `POST /device/heartbeat` | device | Oynatma |
 
 ## Klasör yapısı
 
@@ -83,24 +102,28 @@ token'la erişir. TV bizim JWT'mizi kullanır, Google token'ını asla görmez.
 backend/
   prisma/schema.prisma
   src/
-    index.ts            # Express app + route bağlama
+    index.ts            # Express app + route bağlama + bootstrap admin
     config.ts           # env doğrulama
     db.ts               # Prisma client
     lib/
       r2.ts             # S3 client (Cloudflare R2)
-      jwt.ts            # kendi JWT üret/doğrula
-      crypto.ts         # refresh token şifreleme
-    google/
-      oauth.ts          # device flow + token yenileme
-      photos.ts         # Photos Library API
-      drive.ts          # Drive API
-    middleware/auth.ts  # Bearer JWT doğrulama
+      jwt.ts            # admin + cihaz JWT
+      gallery.ts        # galeri/cihaz playlist üretimi (signed URL)
+      thumbnail.ts      # video önizleme karesi (ffmpeg)
+    middleware/auth.ts  # requireAdmin / requireDevice
     routes/
-      auth.ts           # /auth/device/*
-      google.ts         # /google/photos /google/drive
-      media.ts          # /media (list, import, delete)
-      playlists.ts      # /playlist (get/update sıra+süre)
-      upload.ts         # /upload/session /upload/file
-  public/upload.html    # QR telefon yükleme sayfası
+      admin-auth.ts     # /admin/auth/*
+      clinics.ts        # /clinics
+      galleries.ts      # /galleries
+      devices.ts        # /devices (bind/atama — admin)
+      media.ts          # /media (panel upload)
+      device.ts         # /device (pair/playlist/heartbeat — TV)
+panel/                  # Vite + React + TS admin paneli
+  src/
+    api.ts              # backend istemcisi
+    pages/              # Login, Clinics, ClinicDetail, GalleryEditor
+    components/TopBar.tsx
 tv-app/                 # react-native-tvos
+  App.tsx               # pair ↔ player
+  src/screens/          # PairScreen, PlayerScreen
 ```

@@ -1,141 +1,170 @@
 import { Router } from 'express';
 import { z } from 'zod';
+import multer from 'multer';
 import crypto from 'node:crypto';
 import { prisma } from '../db.js';
-import { requireAuth } from '../middleware/auth.js';
-import { deleteObject, putObject, signedGetUrl } from '../lib/r2.js';
+import { requireAdmin } from '../middleware/auth.js';
+import {
+  deleteObject,
+  putObject,
+  signedGetUrl,
+  signedPutUrl,
+  getObjectBuffer,
+} from '../lib/r2.js';
 import { generateAndStoreThumb } from '../lib/thumbnail.js';
-import { getValidAccessToken } from '../google/oauth.js';
-import { listAlbumItems, isVideo, downloadPhotosItem } from '../google/photos.js';
-import { listFiles, downloadDriveFile } from '../google/drive.js';
-import { addToDefaultPlaylist } from '../lib/playlist.js';
+import { URL_TTL } from '../lib/gallery.js';
 
 export const mediaRouter = Router();
-mediaRouter.use(requireAuth);
+mediaRouter.use(requireAdmin);
 
-const MEDIA_URL_TTL = 3600; // galeri önizleme URL'i ömrü (sn)
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 500 * 1024 * 1024 }, // 500 MB / dosya
+});
 
-// Kullanıcının tüm medyası (galeri için imzalı önizleme URL'leriyle).
+function typeOf(mime: string): 'IMAGE' | 'VIDEO' | null {
+  return mime.startsWith('video/') ? 'VIDEO' : mime.startsWith('image/') ? 'IMAGE' : null;
+}
+
+function makeKey(clinicId: string, filename: string): string {
+  const ext = filename.includes('.') ? filename.slice(filename.lastIndexOf('.')) : '';
+  return `${clinicId}/${crypto.randomUUID()}${ext}`;
+}
+
+// Klinik havuzundaki tüm medya (panel grid'i için thumbnail tercihli imzalı URL'lerle).
 mediaRouter.get('/', async (req, res) => {
+  const clinicId = z.string().min(1).safeParse(req.query.clinicId);
+  if (!clinicId.success) return res.status(400).json({ error: 'clinicId_required' });
   const items = await prisma.mediaItem.findMany({
-    where: { userId: req.userId! },
+    where: { clinicId: clinicId.data },
     orderBy: { createdAt: 'desc' },
   });
   const withUrls = await Promise.all(
-    items.map(async (m) => ({
-      id: m.id,
-      type: m.type,
-      originalName: m.originalName,
-      status: m.status,
-      width: m.width,
-      height: m.height,
-      createdAt: m.createdAt,
-      // READY olmayan / r2Key'i olmayan öğelerde önizleme yok.
-      url: m.status === 'READY' && m.r2Key ? await signedGetUrl(m.r2Key, MEDIA_URL_TTL) : null,
-      // video önizleme karesi (varsa) — galeride video karolarında gösterilir.
-      thumbnailUrl: m.thumbKey ? await signedGetUrl(m.thumbKey, MEDIA_URL_TTL) : null,
-    })),
+    items.map(async (m) => {
+      const previewKey = m.thumbKey ?? m.r2Key;
+      return {
+        id: m.id,
+        type: m.type,
+        originalName: m.originalName,
+        status: m.status,
+        sizeBytes: m.sizeBytes,
+        createdAt: m.createdAt,
+        previewUrl: m.status === 'READY' && previewKey ? await signedGetUrl(previewKey, URL_TTL) : null,
+      };
+    }),
   );
   res.json({ items: withUrls });
 });
 
-const importBody = z.object({
-  source: z.enum(['GOOGLE_PHOTOS', 'GOOGLE_DRIVE']),
-  // Photos için albumId zorunlu (seçilen id'leri o albümden çözeriz); Drive için gerekmez.
-  albumId: z.string().optional(),
-  ids: z.array(z.string().min(1)).min(1),
+// --- Doğrudan upload (küçük dosyalar; gövde backend'den geçer) ---
+mediaRouter.post('/upload', upload.single('file'), async (req, res) => {
+  const clinicId = z.string().min(1).safeParse(req.query.clinicId || req.body?.clinicId);
+  if (!clinicId.success) return res.status(400).json({ error: 'clinicId_required' });
+  if (!req.file) return res.status(400).json({ error: 'missing_file' });
+  const clinic = await prisma.clinic.findUnique({ where: { id: clinicId.data } });
+  if (!clinic) return res.status(404).json({ error: 'clinic_not_found' });
+
+  const mime = req.file.mimetype;
+  const type = typeOf(mime);
+  if (!type) return res.status(415).json({ error: 'unsupported_type' });
+
+  // Klinik içi dedup: aynı içerik tekrar yüklenirse var olan kaydı döndür.
+  const contentHash = crypto.createHash('sha256').update(req.file.buffer).digest('hex');
+  const existing = await prisma.mediaItem.findUnique({
+    where: { clinicId_contentHash: { clinicId: clinic.id, contentHash } },
+  });
+  if (existing) return res.json({ ok: true, mediaId: existing.id, type: existing.type, deduped: true });
+
+  const key = makeKey(clinic.id, req.file.originalname);
+  await putObject(key, req.file.buffer, mime);
+  const thumbKey = type === 'VIDEO' ? await generateAndStoreThumb(req.file.buffer, key) : null;
+
+  const media = await prisma.mediaItem.create({
+    data: {
+      clinicId: clinic.id,
+      type,
+      status: 'READY',
+      r2Key: key,
+      thumbKey,
+      contentHash,
+      originalName: req.file.originalname,
+      mimeType: mime,
+      sizeBytes: req.file.size,
+    },
+  });
+  res.status(201).json({ ok: true, mediaId: media.id, type });
 });
 
-// Seçilen Google öğelerini R2'ye kopyalar, MediaItem oluşturur, playlist'e ekler.
-mediaRouter.post('/import', async (req, res) => {
-  const parsed = importBody.safeParse(req.body);
+// --- Doğrudan R2'ye upload (büyük videolar) ---
+const presignBody = z.object({
+  clinicId: z.string().min(1),
+  filename: z.string().min(1),
+  contentType: z.string().min(1),
+});
+
+// 1) Panel: dosyayı doğrudan R2'ye PUT etmek için imzalı URL ister.
+mediaRouter.post('/presign', async (req, res) => {
+  const parsed = presignBody.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: 'bad_request' });
-  const { source, albumId, ids } = parsed.data;
-  const userId = req.userId!;
+  const { clinicId, filename, contentType } = parsed.data;
+  if (!typeOf(contentType)) return res.status(415).json({ error: 'unsupported_type' });
+  const clinic = await prisma.clinic.findUnique({ where: { id: clinicId } });
+  if (!clinic) return res.status(404).json({ error: 'clinic_not_found' });
 
-  try {
-    const token = await getValidAccessToken(userId);
-    const wanted = new Set(ids);
-    const imported: string[] = [];
+  const key = makeKey(clinicId, filename);
+  const putUrl = await signedPutUrl(key, contentType, 30 * 60);
+  res.json({ putUrl, key });
+});
 
-    if (source === 'GOOGLE_PHOTOS') {
-      if (!albumId) return res.status(400).json({ error: 'albumId_required' });
-      const all = await listAlbumItems(token, albumId);
-      for (const item of all.filter((i) => wanted.has(i.id))) {
-        const buf = await downloadPhotosItem(item);
-        const type = isVideo(item) ? 'VIDEO' : 'IMAGE';
-        const key = makeKey(userId, item.filename);
-        await putObject(key, buf, item.mimeType);
-        const thumbKey = type === 'VIDEO' ? await generateAndStoreThumb(buf, key) : null;
-        const media = await upsertMedia({
-          userId, type, source, sourceRef: item.id, r2Key: key, thumbKey,
-          originalName: item.filename, mimeType: item.mimeType, sizeBytes: buf.length,
-          width: num(item.mediaMetadata?.width), height: num(item.mediaMetadata?.height),
-        });
-        await addToDefaultPlaylist(userId, media.id);
-        imported.push(media.id);
-      }
-    } else {
-      const all = await listFiles(token);
-      for (const file of all.filter((f) => wanted.has(f.id))) {
-        const buf = await downloadDriveFile(token, file.id);
-        const type = file.mimeType.startsWith('video/') ? 'VIDEO' : 'IMAGE';
-        const key = makeKey(userId, file.name);
-        await putObject(key, buf, file.mimeType);
-        const thumbKey = type === 'VIDEO' ? await generateAndStoreThumb(buf, key) : null;
-        const media = await upsertMedia({
-          userId, type, source, sourceRef: file.id, r2Key: key, thumbKey,
-          originalName: file.name, mimeType: file.mimeType, sizeBytes: buf.length,
-          width: file.imageMediaMetadata?.width ?? file.videoMediaMetadata?.width,
-          height: file.imageMediaMetadata?.height ?? file.videoMediaMetadata?.height,
-          durationSec: file.videoMediaMetadata?.durationMillis
-            ? Number(file.videoMediaMetadata.durationMillis) / 1000
-            : undefined,
-        });
-        await addToDefaultPlaylist(userId, media.id);
-        imported.push(media.id);
-      }
+const completeBody = z.object({
+  clinicId: z.string().min(1),
+  key: z.string().min(1),
+  filename: z.string().min(1),
+  contentType: z.string().min(1),
+  sizeBytes: z.number().int().nonnegative().optional(),
+});
+
+// 2) Panel: PUT bitince çağırır → MediaItem oluştur (video ise thumbnail üret).
+mediaRouter.post('/complete', async (req, res) => {
+  const parsed = completeBody.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: 'bad_request' });
+  const { clinicId, key, filename, contentType, sizeBytes } = parsed.data;
+  // Güvenlik: anahtar bu kliniğin önekinde olmalı.
+  if (!key.startsWith(`${clinicId}/`)) return res.status(403).json({ error: 'forbidden_key' });
+  const type = typeOf(contentType);
+  if (!type) return res.status(415).json({ error: 'unsupported_type' });
+  const clinic = await prisma.clinic.findUnique({ where: { id: clinicId } });
+  if (!clinic) return res.status(404).json({ error: 'clinic_not_found' });
+
+  let thumbKey: string | null = null;
+  if (type === 'VIDEO') {
+    try {
+      thumbKey = await generateAndStoreThumb(await getObjectBuffer(key), key);
+    } catch {
+      thumbKey = null;
     }
-
-    res.json({ importedCount: imported.length, ids: imported });
-  } catch (err) {
-    console.error(err);
-    res.status(502).json({ error: 'import_failed' });
   }
+
+  const media = await prisma.mediaItem.create({
+    data: {
+      clinicId,
+      type,
+      status: 'READY',
+      r2Key: key,
+      thumbKey,
+      originalName: filename,
+      mimeType: contentType,
+      ...(sizeBytes != null ? { sizeBytes } : {}),
+    },
+  });
+  res.status(201).json({ ok: true, mediaId: media.id, type });
 });
 
 mediaRouter.delete('/:id', async (req, res) => {
-  const media = await prisma.mediaItem.findFirst({
-    where: { id: req.params.id, userId: req.userId! },
-  });
+  const media = await prisma.mediaItem.findUnique({ where: { id: req.params.id } });
   if (!media) return res.status(404).json({ error: 'not_found' });
   if (media.r2Key) await deleteObject(media.r2Key).catch(() => {});
+  if (media.thumbKey) await deleteObject(media.thumbKey).catch(() => {});
   await prisma.mediaItem.delete({ where: { id: media.id } });
   res.json({ ok: true });
 });
-
-// --- yardımcılar ---
-
-function makeKey(userId: string, name: string): string {
-  const ext = name.includes('.') ? name.slice(name.lastIndexOf('.')) : '';
-  return `${userId}/${crypto.randomUUID()}${ext}`;
-}
-
-function num(v?: string): number | undefined {
-  return v ? Number(v) : undefined;
-}
-
-async function upsertMedia(data: {
-  userId: string; type: 'IMAGE' | 'VIDEO'; source: 'GOOGLE_PHOTOS' | 'GOOGLE_DRIVE';
-  sourceRef: string; r2Key: string; thumbKey?: string | null; originalName: string; mimeType: string;
-  sizeBytes: number; width?: number; height?: number; durationSec?: number;
-}) {
-  // Aynı kaynak öğesi tekrar import edilirse güncelle (unique: userId+source+sourceRef).
-  return prisma.mediaItem.upsert({
-    where: {
-      userId_source_sourceRef: { userId: data.userId, source: data.source, sourceRef: data.sourceRef },
-    },
-    create: { ...data, status: 'READY' },
-    update: { ...data, status: 'READY' },
-  });
-}

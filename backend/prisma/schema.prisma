@@ -12,50 +12,133 @@ enum MediaType {
   VIDEO
 }
 
-enum MediaSource {
-  GOOGLE_PHOTOS
-  GOOGLE_DRIVE
-  UPLOAD
-}
-
 enum MediaStatus {
   PENDING // R2'ye kopyalama/işleme bekliyor
-  READY   // oynatılabilir
+  READY // oynatılabilir
   FAILED
 }
 
-model User {
+enum DeviceStatus {
+  UNPAIRED // TV kod gösteriyor, henüz panelden bağlanmadı
+  PAIRED // klinik + galeri atanmış, oynatabilir
+}
+
+enum GalleryKind {
+  DEVICE // tek bir cihaza özel galeri
+  SHARED // klinik genelinde ortak galeri
+}
+
+// Panele login olan yönetici. Çoklu admin; hepsi tüm klinikleri yönetir.
+model Admin {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  name         String?
+  createdAt    DateTime @default(now())
+}
+
+// Yöneticinin elle eklediği klinik. Cihazlar ve galeriler kliniğe bağlıdır.
+model Clinic {
   id        String   @id @default(cuid())
-  googleSub String   @unique // Google hesabının kalıcı kimliği (sub)
-  email     String   @unique
-  name      String?
-  avatarUrl String?
+  name      String
+  address   String?
   createdAt DateTime @default(now())
 
-  googleToken    GoogleToken?
-  mediaItems     MediaItem[]
-  playlists      Playlist[]
-  uploadSessions UploadSession[]
+  devices    Device[]
+  galleries  Gallery[]
+  mediaItems MediaItem[]
+
+  @@index([name])
 }
 
-// Google OAuth token'ları. refreshToken ENCRYPTION_KEY ile şifreli saklanır.
-model GoogleToken {
-  id           String    @id @default(cuid())
-  userId       String    @unique
-  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  refreshToken String // şifreli (iv:tag:ciphertext)
-  accessToken  String? // şifreli; kısa ömürlü cache
-  expiresAt    DateTime?
-  scope        String?
-  updatedAt    DateTime  @updatedAt
+// Fiziksel TV/ekran. Açılışta UNPAIRED kod gösterir; panelden bağlanınca PAIRED olur.
+model Device {
+  id     String       @id @default(cuid())
+  name   String?
+  status DeviceStatus @default(UNPAIRED)
+
+  clinicId String?
+  clinic   Clinic? @relation(fields: [clinicId], references: [id], onDelete: SetNull)
+
+  // Eşleştirme: TV ekranda pairingCode gösterir, poll için pairingSecret'i saklar.
+  // Bağlanınca ikisi de temizlenir.
+  pairingCode   String? @unique
+  pairingSecret String?
+
+  // Atanan galeriler. ownGallery cihaza özeldir (bağlanınca otomatik oluşturulur),
+  // sharedGallery kliniğin ortak galerisidir (opsiyonel).
+  ownGalleryId String?  @unique
+  ownGallery   Gallery? @relation("DeviceOwnGallery", fields: [ownGalleryId], references: [id], onDelete: SetNull)
+
+  sharedGalleryId String?
+  sharedGallery   Gallery? @relation("DeviceSharedGallery", fields: [sharedGalleryId], references: [id], onDelete: SetNull)
+
+  lastSeenAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([clinicId])
+  @@index([pairingCode])
 }
 
+// Sıralı medya koleksiyonu (eski Playlist'in yerine). Oynatma ayarlarını taşır.
+model Gallery {
+  id       String      @id @default(cuid())
+  clinicId String
+  clinic   Clinic      @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+  kind     GalleryKind
+  name     String
+
+  // Oynatma (loop) ayarları
+  loop             Boolean @default(true)
+  shuffle          Boolean @default(false)
+  imageDurationSec Int     @default(8)
+
+  createdAt DateTime @default(now())
+
+  items GalleryItem[]
+
+  // ters ilişkiler (Device tarafındaki atamalar)
+  ownerDevice   Device?  @relation("DeviceOwnGallery")
+  sharedDevices Device[] @relation("DeviceSharedGallery")
+
+  @@index([clinicId, kind])
+}
+
+model GalleryItem {
+  id          String    @id @default(cuid())
+  galleryId   String
+  gallery     Gallery   @relation(fields: [galleryId], references: [id], onDelete: Cascade)
+  mediaItemId String
+  mediaItem   MediaItem @relation("ItemMedia", fields: [mediaItemId], references: [id], onDelete: Cascade)
+  position    Int
+  // görseller için ekranda kalma süresi (sn). Video ise yok sayılır (tam uzunluk oynar).
+  durationSec Int       @default(8)
+
+  // --- Overlay (bindirme): içeriğin üstünde gösterilir ---
+  // Altta sağdan sola kayan yazı (boşsa gösterilmez).
+  tickerText     String?
+  tickerColor    String?    @default("#ffffff") // kayan yazı metin rengi (hex)
+  tickerOpacity  Float?     @default(1)         // kayan yazı opaklığı (0..1)
+  tickerBgColor  String?    @default("#000000") // kayan yazı şeridi arka plan rengi (hex)
+  tickerBgOpacity Float?    @default(0.6)       // kayan yazı şeridi opaklığı (0..1)
+  // Reklam/banner görseli (havuzdan bir IMAGE). Konum/boyut ekran oranına göre 0..1.
+  overlayImageId String?
+  overlayImage   MediaItem? @relation("ItemOverlay", fields: [overlayImageId], references: [id], onDelete: SetNull)
+  overlayX       Float?     @default(0.72) // sol kenar (0..1)
+  overlayY       Float?     @default(0.72) // üst kenar (0..1)
+  overlayW       Float?     @default(0.22) // genişlik (ekran genişliğinin oranı)
+  overlayH       Float?     @default(0.18) // yükseklik (ekran yüksekliğinin oranı)
+
+  @@unique([galleryId, mediaItemId])
+  @@index([galleryId, position])
+}
+
+// Panelden R2'ye yüklenen medya. Klinik havuzuna aittir; galerilere eklenir.
 model MediaItem {
   id           String      @id @default(cuid())
-  userId       String
-  user         User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  clinicId     String
+  clinic       Clinic      @relation(fields: [clinicId], references: [id], onDelete: Cascade)
   type         MediaType
-  source       MediaSource
   status       MediaStatus @default(PENDING)
   r2Key        String? // R2 nesne anahtarı (READY olunca dolu)
   thumbKey     String? // video önizleme karesi (R2 anahtarı); görsellerde boş
@@ -65,56 +148,14 @@ model MediaItem {
   durationSec  Float? // video uzunluğu (sn)
   width        Int?
   height       Int?
-  // kaynağa özel referans (Photos mediaItem id / Drive file id) — tekrar import'u önlemek için
-  sourceRef    String?
+  // içerik hash'i — aynı dosyanın klinik içinde tekrar yüklenmesini önler
+  contentHash  String?
   createdAt    DateTime    @default(now())
 
-  playlistItems PlaylistItem[]
+  galleryItems    GalleryItem[] @relation("ItemMedia")
+  overlayForItems GalleryItem[] @relation("ItemOverlay")
 
-  @@index([userId, status])
-  @@unique([userId, source, sourceRef])
-}
-
-model Playlist {
-  id        String   @id @default(cuid())
-  userId    String
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  name      String   @default("Varsayılan")
-  isDefault Boolean  @default(true)
-  // Oynatma (loop) ayarları
-  loop             Boolean @default(true) // liste bitince başa dön
-  shuffle          Boolean @default(false) // rastgele sırayla oynat
-  imageDurationSec Int     @default(8) // görsellerin ekranda kalma süresi (sn)
-  createdAt DateTime @default(now())
-
-  items PlaylistItem[]
-
-  @@index([userId])
-}
-
-model PlaylistItem {
-  id          String    @id @default(cuid())
-  playlistId  String
-  playlist    Playlist  @relation(fields: [playlistId], references: [id], onDelete: Cascade)
-  mediaItemId String
-  mediaItem   MediaItem @relation(fields: [mediaItemId], references: [id], onDelete: Cascade)
-  position    Int
-  // görseller için ekranda kalma süresi (sn). Video ise yok sayılır (tam uzunluk oynar).
-  durationSec Int       @default(8)
-
-  @@unique([playlistId, mediaItemId])
-  @@index([playlistId, position])
-}
-
-// QR ile telefondan login'siz yükleme için tek seferlik oturum.
-model UploadSession {
-  id        String   @id @default(cuid())
-  userId    String
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  token     String   @unique
-  expiresAt DateTime
-  usedCount Int      @default(0)
-  createdAt DateTime @default(now())
-
-  @@index([token])
+  @@unique([clinicId, contentHash])
+  @@index([clinicId, status])
+  @@index([clinicId, createdAt])
 }
