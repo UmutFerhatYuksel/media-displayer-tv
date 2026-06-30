@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { View, Text, Image, StyleSheet, Animated, Easing, Pressable, useTVEventHandler, type DimensionValue } from 'react-native';
+import { View, Text, Image, StyleSheet, Animated, Easing, Pressable, useTVEventHandler } from 'react-native';
 import Video from 'react-native-video';
 import { getDevicePlaylist, heartbeat, syncWait, deviceInfo, type PlayEntry, type DevicePlaylist, type DeviceInfo } from '../api';
 import { cacheFile, cachedUri, prune } from '../mediaCache';
@@ -17,7 +17,10 @@ export function PlayerScreen({ onUnpaired }: { onUnpaired: () => void }) {
   const [serverOnline, setServerOnline] = useState(false);
   const [info, setInfo] = useState<DeviceInfo | null>(null);
   const [infoVisible, setInfoVisible] = useState(false);
+  // Arka planda inen videonun durumu (progress bar için). Aynı anda tek video iner.
+  const [dl, setDl] = useState<{ id: string; name: string; frac: number } | null>(null);
   const revision = useRef<string>('');
+  const indexRef = useRef(0); // arka plan indiricinin "şu an oynayan" öğeyi önceliklemesi için
   const imageTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const infoTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -29,25 +32,60 @@ export function PlayerScreen({ onUnpaired }: { onUnpaired: () => void }) {
     return list;
   };
 
-  const applyPlaylistState = useCallback((data: DevicePlaylist, resolved: PlayEntry[]) => {
+  const applyPlaylistState = useCallback((data: DevicePlaylist, resolved: PlayEntry[]): PlayEntry[] => {
     const list = data.shuffle ? shuffleInPlace(resolved.slice()) : resolved;
     setItems(list);
     setLoop(data.loop);
     setImageDur(data.imageDurationSec);
     setIndex((i) => (i < list.length ? i : 0));
     setLoading(false);
+    return list;
   }, []);
 
-  // Çevrimiçi senkron: medya + overlay yerel dosyaya indirilir, url'ler file:// olur.
-  // İndirilemeyen (ama online olan) öğe uzaktan oynar; sonraki turda tekrar denenir.
+  // Arka planda öncelikli + SIRALI indirme: hattı doyurmamak için tek tek iner; her dosya
+  // inince listeyi file://'a çevirir. Yeni playlist gelince (revision değişince) bırakır.
+  // ÖNCELİK (cache-first ile uyumlu): önce GÖRSELLER (küçük, hemen oynatılır), sonra VİDEOLAR
+  // (ağır; inene kadar zaten döngüde atlanıyor). Her grup oynayan öğeden başlayıp döner.
+  const cacheInBackground = useCallback(async (rev: string, list: PlayEntry[]) => {
+    const n = list.length;
+    if (n === 0) return;
+    const start = Math.min(indexRef.current, n - 1);
+    const rotated = Array.from({ length: n }, (_, k) => list[(start + k) % n]);
+    const order = [...rotated.filter((e) => e.type === 'IMAGE'), ...rotated.filter((e) => e.type === 'VIDEO')];
+    for (const e of order) {
+      if (revision.current !== rev) { setDl(null); return; }
+      if (!e.url.startsWith('file')) {
+        const isVideo = e.type === 'VIDEO';
+        // Video inişini progress bar'da göster; görseller küçük olduğundan göstermeyiz.
+        if (isVideo) setDl({ id: e.mediaId, name: e.originalName ?? 'Video', frac: 0 });
+        const local = await cacheFile(
+          e.mediaId, e.url, isVideo,
+          isVideo ? (frac) => setDl((d) => (d && d.id === e.mediaId ? { ...d, frac } : d)) : undefined,
+        );
+        if (isVideo) setDl((d) => (d && d.id === e.mediaId ? null : d));
+        if (revision.current !== rev) { setDl(null); return; }
+        if (local) setItems((prev) => prev.map((p) => (p.mediaId === e.mediaId ? { ...p, url: local } : p)));
+      }
+      const ov = e.overlay;
+      if (ov && !ov.url.startsWith('file')) {
+        const ovLocal = await cacheFile('ov_' + ov.id, ov.url, false);
+        if (revision.current !== rev) return;
+        if (ovLocal) setItems((prev) => prev.map((p) => (p.overlay && p.overlay.id === ov.id ? { ...p, overlay: { ...p.overlay, url: ovLocal } } : p)));
+      }
+    }
+  }, []);
+
+  // Çevrimiçi senkron: cache'te olanı hemen file://, olmayanı uzaktan URL ile uygula
+  // (indirmeyi BEKLEME) → ekran saniyeler içinde dolar. Sonra arka planda öncelikli indir;
+  // bittikçe öğeler otomatik file://'a döner.
   const applyOnline = useCallback(async (data: DevicePlaylist) => {
     await savePlaylist(data);
     const resolved = await Promise.all(
       data.items.map(async (e) => {
-        const localMedia = await cacheFile(e.mediaId, e.url, e.type === 'VIDEO');
+        const localMedia = await cachedUri(e.mediaId);
         let overlay = e.overlay ?? null;
         if (overlay) {
-          const ov = await cacheFile('ov_' + overlay.id, overlay.url, false);
+          const ov = await cachedUri('ov_' + overlay.id);
           if (ov) overlay = { ...overlay, url: ov };
         }
         return { ...e, url: localMedia ?? e.url, overlay };
@@ -57,8 +95,9 @@ export function PlayerScreen({ onUnpaired }: { onUnpaired: () => void }) {
     const keep = new Set<string>();
     data.items.forEach((e) => { keep.add(e.mediaId); if (e.overlay) keep.add('ov_' + e.overlay.id); });
     await prune(keep);
-    applyPlaylistState(data, resolved);
-  }, [applyPlaylistState]);
+    const list = applyPlaylistState(data, resolved);
+    cacheInBackground(data.revision, list).catch(() => {}); // await yok: arka planda iner
+  }, [applyPlaylistState, cacheInBackground]);
 
   // Çevrimdışı açılış: kalıcı playlist'ten yalnızca cache'li öğeleri oynat (indirme yok).
   const applyOffline = useCallback(async (): Promise<boolean> => {
@@ -104,18 +143,30 @@ export function PlayerScreen({ onUnpaired }: { onUnpaired: () => void }) {
   }, [applyOnline, onUnpaired]);
 
   // İlk yükleme (önce cache → sonra ağ) + periyodik yenileme + canlılık (heartbeat).
+  // Interval yerine jitter'lı self-scheduling timeout: 60 sn ± 0–15 sn rastgele kayma →
+  // çok sayıda cihazın aynı anda istek atıp backend/R2'yi tıkamasını (sürü etkisi) dağıtır.
   useEffect(() => {
     let mounted = true;
+    let refreshTimer: ReturnType<typeof setTimeout>;
+    let hbTimer: ReturnType<typeof setTimeout>;
+    const jitter = () => 60 * 1000 + Math.floor(Math.random() * 15 * 1000);
+    const scheduleRefresh = () => {
+      refreshTimer = setTimeout(async () => { await fetchPlaylist(); if (mounted) scheduleRefresh(); }, jitter());
+    };
+    const scheduleHb = () => {
+      hbTimer = setTimeout(async () => { await heartbeat().catch(() => {}); if (mounted) scheduleHb(); }, jitter());
+    };
     (async () => {
       await applyOffline().catch(() => {}); // offline olsa bile ekran anında dolu gelsin
-      if (mounted) fetchPlaylist();          // ağ varsa tazele/indir
+      if (!mounted) return;
+      fetchPlaylist();                       // ağ varsa tazele/indir
+      scheduleRefresh();
+      scheduleHb();
     })();
-    const refresh = setInterval(fetchPlaylist, 60 * 1000); // 1 dk: içerik değişimi + indirme
-    const hb = setInterval(() => { heartbeat().catch(() => {}); }, 60 * 1000);
     return () => {
       mounted = false;
-      clearInterval(refresh);
-      clearInterval(hb);
+      clearTimeout(refreshTimer);
+      clearTimeout(hbTimer);
     };
   }, [fetchPlaylist, applyOffline]);
 
@@ -173,6 +224,7 @@ export function PlayerScreen({ onUnpaired }: { onUnpaired: () => void }) {
   // advance'in her zaman güncel listeyi görmesi için ref (closure'dan eski uzunluk okumayı önler).
   const itemsRef = useRef(items);
   itemsRef.current = items;
+  indexRef.current = index;
 
   const advance = useCallback(() => {
     setIndex((i) => {
@@ -192,7 +244,22 @@ export function PlayerScreen({ onUnpaired }: { onUnpaired: () => void }) {
   // index bir an taşsa bile çökmeyelim: ilk öğeye düş (bir sonraki render düzeltir).
   const current = items[index] ?? items[0];
 
-  // Görsel: kendi süresi (yoksa galeri geneli) kadar bekle. Video: onEnd ile ilerle.
+  // Cache-first: VIDEO yalnızca tamamen indirilmişse (url file://) oynatılır. İnmemiş video,
+  // yavaş hatta stream edilip kekelemek yerine döngüde ATLANIR; arka planda inince otomatik
+  // oynar. GÖRSEL küçük olduğundan her zaman gösterilir (gerekirse uzaktan yüklenir).
+  const isReady = (e?: PlayEntry) => !!e && (e.type === 'IMAGE' || e.url.startsWith('file'));
+  const anyReady = items.some(isReady);
+
+  // İnmemiş videoya denk gelince kısa gecikmeyle atla. Hiç hazır öğe yoksa atlama (sonsuz
+  // döngü olmasın) — bunun yerine aşağıda "hazırlanıyor" ekranı gösterilir.
+  useEffect(() => {
+    if (current && current.type === 'VIDEO' && !current.url.startsWith('file') && anyReady) {
+      const t = setTimeout(advance, 50);
+      return () => clearTimeout(t);
+    }
+  }, [current, anyReady, advance]);
+
+  // Görsel: kendi süresi (yoksa galeri geneli) kadar bekle. Video (hazır): onEnd ile ilerle.
   useEffect(() => {
     if (imageTimer.current) clearTimeout(imageTimer.current);
     if (current?.type === 'IMAGE') {
@@ -207,63 +274,107 @@ export function PlayerScreen({ onUnpaired }: { onUnpaired: () => void }) {
   if (loading) {
     return <View style={styles.center}><Text style={styles.msg}>Yükleniyor…</Text></View>;
   }
-  if (!items.length) {
+  // Hiç içerik yok VEYA tüm öğeler henüz inmemiş video → duruma göre mesaj.
+  if (!items.length || !anyReady) {
+    const downloading = items.length > 0;
     return (
       <View style={styles.center}>
-        <Text style={styles.msg}>İçerik bekleniyor…</Text>
-        <Text style={styles.sub}>Panelden bu cihaza galeri atayın.</Text>
+        <Text style={styles.msg}>{downloading ? 'İçerik hazırlanıyor…' : 'İçerik bekleniyor…'}</Text>
+        <Text style={styles.sub}>{downloading ? 'Video indiriliyor, birazdan başlayacak.' : 'Panelden bu cihaza galeri atayın.'}</Text>
+        {dl && <DownloadProgress name={dl.name} frac={dl.frac} big />}
+        <Pressable style={StyleSheet.absoluteFill} focusable hasTVPreferredFocus onPress={toggleInfo} />
+        {infoVisible && <InfoOverlay info={info} online={serverOnline} />}
+      </View>
+    );
+  }
+  // current bir an inmemiş videoya denk geldiyse (atlama efekti birazdan ilerletecek): bu
+  // kare için siyah göster — stream etme, kekeleme olmaz.
+  if (!isReady(current)) {
+    return (
+      <View style={styles.center}>
+        {dl && <DownloadProgress name={dl.name} frac={dl.frac} />}
         <Pressable style={StyleSheet.absoluteFill} focusable hasTVPreferredFocus onPress={toggleInfo} />
         {infoVisible && <InfoOverlay info={info} online={serverOnline} />}
       </View>
     );
   }
 
+  // Reklam görseli bir kenara yaslanır ve içeriği o kadar küçültür ("squeeze-back").
+  // Video kapanmaz; kalan alana sığar. side: kenar, size: o kenarın ekran oranı.
+  const ov = current.overlay ?? null;
+  // İçerik önce, reklam sonra render edilir; sol/üst kenarda reklamı öne almak için reverse.
+  const flexDir: 'row' | 'row-reverse' | 'column' | 'column-reverse' = !ov
+    ? 'column'
+    : ov.side === 'left' ? 'row-reverse'
+    : ov.side === 'right' ? 'row'
+    : ov.side === 'top' ? 'column-reverse'
+    : 'column'; // bottom
+  // Bölmeyi flex oranıyla yapıyoruz (her iki eksende sorunsuz): içerik 1-size, reklam size.
+  const contentFlex = ov ? 1 - ov.size : 1;
+
   return (
-    <View style={styles.stage}>
-      {current.type === 'IMAGE' ? (
-        <Image source={{ uri: current.url }} style={styles.media} resizeMode="contain" />
-      ) : (
-        <Video
-          source={{ uri: current.url }}
-          style={styles.media}
-          resizeMode="contain"
-          paused={false}
-          repeat={loop && items.length === 1}
-          onEnd={advance}
-          onError={advance}
-        />
-      )}
+    <View style={[styles.stage, { flexDirection: flexDir }]}>
+      {/* İçerik (küçülen video/görsel) */}
+      <View style={[styles.content, { flexGrow: contentFlex, flexBasis: 0, alignSelf: 'stretch' }]}>
+        {current.type === 'IMAGE' ? (
+          <Image source={{ uri: current.url }} style={styles.media} resizeMode="contain" />
+        ) : (
+          <Video
+            source={{ uri: current.url }}
+            style={styles.media}
+            resizeMode="contain"
+            paused={false}
+            repeat={loop && items.length === 1}
+            onEnd={advance}
+            onError={advance}
+          />
+        )}
 
-      {/* Banner (reklam görseli) — konum/boyut ekran oranına göre */}
-      {current.overlay && (
+        {/* Alt kayan yazı — içerik alanının altında */}
+        {current.tickerText ? (
+          <Ticker
+            text={current.tickerText}
+            color={current.tickerColor ?? '#fff'}
+            opacity={current.tickerOpacity ?? 1}
+            bgColor={current.tickerBgColor ?? '#000'}
+            bgOpacity={current.tickerBgOpacity ?? 0.6}
+          />
+        ) : null}
+      </View>
+
+      {/* Reklam şeridi — flex oranıyla aynı eksende pay alır */}
+      {ov && (
         <Image
-          source={{ uri: current.overlay.url }}
-          resizeMode="contain"
-          style={{
-            position: 'absolute',
-            left: `${current.overlay.x * 100}%` as DimensionValue,
-            top: `${current.overlay.y * 100}%` as DimensionValue,
-            width: `${current.overlay.w * 100}%` as DimensionValue,
-            height: `${current.overlay.h * 100}%` as DimensionValue,
-          }}
+          source={{ uri: ov.url }}
+          resizeMode="cover"
+          style={{ flexGrow: ov.size, flexBasis: 0, alignSelf: 'stretch' }}
         />
       )}
 
-      {/* Alt kayan yazı */}
-      {current.tickerText ? (
-        <Ticker
-          text={current.tickerText}
-          color={current.tickerColor ?? '#fff'}
-          opacity={current.tickerOpacity ?? 1}
-          bgColor={current.tickerBgColor ?? '#000'}
-          bgOpacity={current.tickerBgOpacity ?? 0.6}
-        />
-      ) : null}
+      {/* Arka planda video inerken küçük ilerleme rozeti (oynatmayı engellemez) */}
+      {dl && <DownloadProgress name={dl.name} frac={dl.frac} />}
 
       {/* OK tuşunu yakalamak için ekranı kaplayan odaklanabilir katman (saydam) */}
       <Pressable style={StyleSheet.absoluteFill} focusable hasTVPreferredFocus onPress={toggleInfo} />
 
       {infoVisible && <InfoOverlay info={info} online={serverOnline} />}
+    </View>
+  );
+}
+
+// İnen videonun ilerlemesi: köşede küçük rozet (big=false) veya "hazırlanıyor" ekranında
+// geniş panel (big=true). Track, yüzde yerine flex oranıyla dolar (DimensionValue gerekmez).
+function DownloadProgress({ name, frac, big }: { name: string; frac: number; big?: boolean }) {
+  const pct = Math.round(frac * 100);
+  return (
+    <View style={big ? styles.dlPanel : styles.dlBadge} pointerEvents="none">
+      <Text style={big ? styles.dlPanelText : styles.dlBadgeText} numberOfLines={1}>
+        ⬇ {name} · %{pct}
+      </Text>
+      <View style={styles.dlTrack}>
+        <View style={[styles.dlFill, { flex: frac }]} />
+        <View style={{ flex: 1 - frac }} />
+      </View>
     </View>
   );
 }
@@ -338,6 +449,7 @@ function Ticker({
 
 const styles = StyleSheet.create({
   stage: { flex: 1, backgroundColor: '#000', alignItems: 'center', justifyContent: 'center' },
+  content: { backgroundColor: '#000', alignItems: 'center', justifyContent: 'center' },
   media: { width: '100%', height: '100%' },
   center: { flex: 1, backgroundColor: '#000', alignItems: 'center', justifyContent: 'center' },
   msg: { color: '#fff', fontSize: 28 },
@@ -358,4 +470,18 @@ const styles = StyleSheet.create({
   infoText: { color: '#e5e9f0', fontSize: 18, marginTop: 2 },
   infoDim: { color: '#8b93a7', fontSize: 14, marginTop: 6 },
   infoHint: { color: '#6b7280', fontSize: 13, marginTop: 12, fontStyle: 'italic' },
+  // İndirme ilerleme rozeti (köşe) + geniş panel (hazırlanıyor ekranı)
+  dlBadge: {
+    position: 'absolute', top: 28, left: 28, minWidth: 300, maxWidth: 520,
+    backgroundColor: 'rgba(17,20,28,0.88)', borderRadius: 12, paddingHorizontal: 16, paddingVertical: 12,
+    borderWidth: 1, borderColor: 'rgba(255,255,255,0.12)',
+  },
+  dlBadgeText: { color: '#e5e9f0', fontSize: 16, marginBottom: 8 },
+  dlPanel: { width: 520, maxWidth: '80%', marginTop: 28 },
+  dlPanelText: { color: '#e5e9f0', fontSize: 20, marginBottom: 10, textAlign: 'center' },
+  dlTrack: {
+    flexDirection: 'row', height: 6, borderRadius: 3, overflow: 'hidden',
+    backgroundColor: 'rgba(255,255,255,0.15)',
+  },
+  dlFill: { backgroundColor: '#5b9dff', borderRadius: 3 },
 });

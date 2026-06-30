@@ -1,15 +1,25 @@
 import { API_BASE_URL } from './config';
 import { loadDeviceToken } from './storage';
 
-async function req<T>(path: string, opts: RequestInit = {}, auth = true): Promise<T> {
+const DEFAULT_TIMEOUT_MS = 15000;
+
+// Yavaş/kopuk hatta isteklerin sonsuza dek asılı kalmasını önle: AbortController ile
+// timeout. Long-poll (sync-wait) için çağıran daha uzun bir süre geçirir.
+async function req<T>(path: string, opts: RequestInit = {}, auth = true, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<T> {
   const headers: Record<string, string> = { 'content-type': 'application/json', ...(opts.headers as any) };
   if (auth) {
     const token = await loadDeviceToken();
     if (token) headers.authorization = `Bearer ${token}`;
   }
-  const res = await fetch(`${API_BASE_URL}${path}`, { ...opts, headers });
-  if (!res.ok) throw new Error(`${path} -> ${res.status}`);
-  return (await res.json()) as T;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(`${API_BASE_URL}${path}`, { ...opts, headers, signal: ctrl.signal });
+    if (!res.ok) throw new Error(`${path} -> ${res.status}`);
+    return (await res.json()) as T;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // --- Eşleştirme ---
@@ -31,13 +41,12 @@ export const pairPoll = (deviceId: string, pairingSecret: string) =>
   }, false);
 
 // --- Oynatma ---
+export type OverlaySide = 'left' | 'right' | 'top' | 'bottom';
 export interface Overlay {
   id: string; // overlay görselinin cache anahtarı
   url: string;
-  x: number; // 0..1 ekran oranına göre
-  y: number;
-  w: number;
-  h: number;
+  side: OverlaySide; // hangi kenara yaslanır
+  size: number;      // o kenarın kapladığı ekran oranı (0..1)
 }
 export interface PlayEntry {
   galleryItemId: string;
@@ -91,4 +100,5 @@ export const deviceInfo = () => req<DeviceInfo>('/device/me');
 
 // Long-poll: backend isteği ~25 sn açık tutar. Panelden "şimdi senkronla" çağrılınca
 // hemen { sync: true } döner; aksi halde { sync: false } → TV yeniden bağlanır.
-export const syncWait = () => req<{ sync: boolean }>('/device/sync-wait');
+// Backend isteği ~25 sn açık tutar; timeout'u onun üstünde tut (35 sn).
+export const syncWait = () => req<{ sync: boolean }>('/device/sync-wait', {}, true, 35000);

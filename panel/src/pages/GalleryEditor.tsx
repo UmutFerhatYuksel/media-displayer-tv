@@ -55,7 +55,7 @@ export default function GalleryEditor() {
     <>
       <PageHeader
         title={g.name}
-        subtitle={`${g.kind === 'SHARED' ? 'Ortak galeri' : 'Cihaz galerisi'} · ${g.items.length} öğe`}
+        subtitle={`${g.kind === 'SHARED' ? 'Watchlist' : 'Cihaz galerisi'} · ${g.items.length} öğe`}
         actions={<Button variant="primary" onClick={() => setPicker(true)}><Plus size={16} /> Medya ekle</Button>}
       />
 

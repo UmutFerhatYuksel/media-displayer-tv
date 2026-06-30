@@ -40,8 +40,18 @@ function extFromUrl(url: string, isVideo: boolean): string {
   return isVideo ? 'mp4' : 'jpg';
 }
 
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
 // Cache'te varsa yerel file:// uri döner; yoksa indirir. İndirme başarısızsa null.
-export async function cacheFile(key: string, url: string, isVideo: boolean): Promise<string | null> {
+// Yavaş/kopuk hatta dayanıklı: kaldığı yerden devam (resume) + üstel geri çekilmeli retry.
+// onProgress: indirme ilerlemesi (0..1) — UI'da progress bar göstermek için (yalnız büyük
+// dosyalarda anlamlı). %1'den küçük adımlar gereksiz render olmasın diye atlanır.
+export async function cacheFile(
+  key: string,
+  url: string,
+  isVideo: boolean,
+  onProgress?: (frac: number) => void,
+): Promise<string | null> {
   await ensureDir();
   const manifest = await readManifest();
   const existing = manifest[key];
@@ -53,21 +63,40 @@ export async function cacheFile(key: string, url: string, isVideo: boolean): Pro
   const name = `${key}.${extFromUrl(url, isVideo)}`;
   const dest = DIR + name;
   const tmp = dest + '.tmp';
-  try {
-    const res = await FileSystem.downloadAsync(url, tmp);
-    if (res.status !== 200) {
-      await FileSystem.deleteAsync(tmp, { idempotent: true });
-      return null;
+
+  // Tek bir resumable indirme: ilk denemede indir, sonraki denemelerde kaldığı yerden
+  // devam et (büyük video kopuk hatta baştan başlamaz). 3 deneme, 1s/2s bekleme.
+  let lastFrac = -1;
+  const cb = onProgress
+    ? (p: { totalBytesWritten: number; totalBytesExpectedToWrite: number }) => {
+        if (p.totalBytesExpectedToWrite > 0) {
+          const frac = p.totalBytesWritten / p.totalBytesExpectedToWrite;
+          if (frac - lastFrac >= 0.01 || frac >= 1) { lastFrac = frac; onProgress(Math.min(1, frac)); }
+        }
+      }
+    : undefined;
+  const resumable = FileSystem.createDownloadResumable(url, tmp, {}, cb);
+  const MAX = 3;
+  for (let attempt = 0; attempt < MAX; attempt++) {
+    try {
+      const res = attempt === 0 ? await resumable.downloadAsync() : await resumable.resumeAsync();
+      if (res && res.status === 200) {
+        await FileSystem.deleteAsync(dest, { idempotent: true });
+        await FileSystem.moveAsync({ from: tmp, to: dest });
+        manifest[key] = name;
+        await writeManifest(manifest);
+        return dest;
+      }
+      // 4xx (ör. imzalı URL süresi dolmuş): tekrar denemenin anlamı yok, bir sonraki
+      // playlist yenilemesinde taze URL ile yeniden denenir.
+      if (res && res.status >= 400 && res.status < 500) break;
+    } catch {
+      // ağ hatası/timeout: geri çekil, sonra resumeAsync ile devam et.
     }
-    await FileSystem.deleteAsync(dest, { idempotent: true });
-    await FileSystem.moveAsync({ from: tmp, to: dest });
-    manifest[key] = name;
-    await writeManifest(manifest);
-    return dest;
-  } catch {
-    await FileSystem.deleteAsync(tmp, { idempotent: true }).catch(() => {});
-    return null;
+    if (attempt < MAX - 1) await sleep(1000 * Math.pow(2, attempt));
   }
+  await FileSystem.deleteAsync(tmp, { idempotent: true }).catch(() => {});
+  return null;
 }
 
 // Çevrimdışı: indirmeden, cache'te varsa yerel uri döner.

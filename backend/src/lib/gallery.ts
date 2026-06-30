@@ -4,14 +4,13 @@ import type { Gallery } from '@prisma/client';
 
 export const URL_TTL = 3600; // imzalı oynatma URL'i ömrü (sn)
 
-// İçeriğin üstüne bindirilen banner (reklam görseli) — konum/boyut ekran oranına göre 0..1.
+// Reklam görseli — videoyu kapatmaz, bir kenara yerleşip içeriği o kadar küçültür.
+export type OverlaySide = 'left' | 'right' | 'top' | 'bottom';
 export interface Overlay {
   id: string; // overlay görselinin MediaItem id'si (TV tarafında cache anahtarı)
   url: string;
-  x: number;
-  y: number;
-  w: number;
-  h: number;
+  side: OverlaySide; // hangi kenar
+  size: number;      // o kenarın kapladığı ekran oranı (0..1)
 }
 
 export interface PlayEntry {
@@ -47,10 +46,8 @@ export async function buildGalleryEntries(galleryId: string): Promise<PlayEntry[
           ? {
               id: it.overlayImage.id,
               url: await signedGetUrl(it.overlayImage.r2Key, URL_TTL),
-              x: it.overlayX ?? 0.72,
-              y: it.overlayY ?? 0.72,
-              w: it.overlayW ?? 0.22,
-              h: it.overlayH ?? 0.18,
+              side: (it.overlaySide ?? 'right') as OverlaySide,
+              size: it.overlaySize ?? 0.25,
             }
           : null;
       return {
@@ -100,7 +97,7 @@ export async function buildDevicePlaylist(
   // Revision: öğe + süre + overlay/ticker imzası. İmzalı URL hariç (her seferinde değişir).
   const revision = items
     .map((e) => {
-      const o = e.overlay ? `${e.overlay.x},${e.overlay.y},${e.overlay.w},${e.overlay.h}` : '';
+      const o = e.overlay ? `${e.overlay.side},${e.overlay.size}` : '';
       const t = `${e.tickerText ?? ''}~${e.tickerColor ?? ''}~${e.tickerOpacity ?? ''}~${e.tickerBgColor ?? ''}~${e.tickerBgOpacity ?? ''}`;
       return `${e.galleryItemId}:${e.durationSec}:${t}:${o}`;
     })

@@ -11,7 +11,7 @@ import {
   ApiError, type ClinicDetail as Clinic, type ClinicDevice, type MediaItem,
 } from '../api';
 import { PageHeader } from '../components/Layout';
-import { Button, Card, Modal, EmptyState, Skeleton, StatusDot, Badge, lastSeen } from '../ui';
+import { Button, Card, Modal, EmptyState, Skeleton, StatusDot, Badge, Select, lastSeen } from '../ui';
 
 export default function ClinicDetail() {
   const { id } = useParams<{ id: string }>();
@@ -111,19 +111,17 @@ export default function ClinicDetail() {
                       )}
                       <SyncButton deviceId={d.id} />
                       <div className="min-w-[200px] flex-1">
-                        <label className="label flex items-center gap-1.5"><Link2 size={13} /> Ortak galeri</label>
-                        <select
-                          className="input"
+                        <label className="label flex items-center gap-1.5"><Link2 size={13} /> Watchlist</label>
+                        <Select
                           value={d.sharedGalleryId ?? ''}
-                          onChange={async (e) => {
-                            await updateDevice(d.id, { sharedGalleryId: e.target.value || null });
-                            toast.success('Ortak galeri güncellendi');
+                          placeholder="— Yok —"
+                          options={[{ value: '', label: '— Yok —' }, ...sharedGalleries.map((g) => ({ value: g.id, label: g.name }))]}
+                          onChange={async (v) => {
+                            await updateDevice(d.id, { sharedGalleryId: v || null });
+                            toast.success('Watchlist güncellendi');
                             load();
                           }}
-                        >
-                          <option value="">— Yok —</option>
-                          {sharedGalleries.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
-                        </select>
+                        />
                       </div>
                     </div>
                   </Card>
@@ -133,21 +131,21 @@ export default function ClinicDetail() {
           )}
         </section>
 
-        {/* Ortak galeriler */}
+        {/* Watchlist'ler (klinik geneli ortak içerik) */}
         <section>
           <SectionTitle
             icon={<Images size={18} />}
-            title="Ortak galeriler"
+            title="Watchlist'ler"
             count={sharedGalleries.length}
             action={
               <Button size="sm" onClick={async () => {
-                const name = prompt('Ortak galeri adı:');
-                if (name?.trim()) { await createGallery(clinic.id, 'SHARED', name.trim()); toast.success('Galeri oluşturuldu'); load(); }
-              }}><Plus size={15} /> Ekle</Button>
+                const name = prompt('Watchlist adı:');
+                if (name?.trim()) { await createGallery(clinic.id, 'SHARED', name.trim()); toast.success('Watchlist oluşturuldu'); load(); }
+              }}><Plus size={15} /> Watchlist oluştur</Button>
             }
           />
           {sharedGalleries.length === 0 ? (
-            <p className="text-sm text-muted">Henüz ortak galeri yok. Tüm cihazlarda gösterilecek içerik için bir tane oluşturun.</p>
+            <p className="text-sm text-muted">Henüz watchlist yok. Tüm cihazlarda gösterilecek ortak içerik için bir tane oluşturun.</p>
           ) : (
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
               {sharedGalleries.map((g) => (
@@ -195,7 +193,7 @@ function DeviceInfoModal({ device, clinicName, onClose }: { device: ClinicDevice
     { label: 'Durum', value: <Badge tone={device.status === 'PAIRED' ? 'primary' : 'muted'}>{device.status === 'PAIRED' ? 'Eşleşmiş' : 'Eşleşmemiş'}</Badge> },
     { label: 'Bağlantı', value: <span className="flex items-center gap-2"><StatusDot online={seen.online} /> {seen.online ? 'Çevrimiçi' : `Son görülme: ${seen.text}`}</span> },
     { label: 'Klinik', value: clinicName },
-    { label: 'Ortak galeri', value: device.sharedGalleryName ?? '— Yok —' },
+    { label: 'Watchlist', value: device.sharedGalleryName ?? '— Yok —' },
     { label: 'Cihaz ID', value: <code className="text-xs text-muted">{device.id}</code> },
   ];
   return (
@@ -412,7 +410,7 @@ function AssignModal({
   return (
     <Modal title={`${count} medyayı ekle`} onClose={onClose}>
       {targets.length === 0 ? (
-        <p className="text-sm text-muted">Bu klinikte hedef yok. Önce bir cihaz bağlayın veya ortak galeri oluşturun.</p>
+        <p className="text-sm text-muted">Bu klinikte hedef yok. Önce bir cihaz bağlayın veya watchlist oluşturun.</p>
       ) : (
         <>
           <p className="-mt-1 mb-3 text-sm text-muted">Hedef galerileri seçin:</p>
@@ -433,7 +431,7 @@ function AssignModal({
                   </span>
                   {t.kind === 'device' ? <MonitorPlay size={16} className="text-primary" /> : <Images size={16} className="text-accent" />}
                   <span className="flex-1">{t.label}</span>
-                  <Badge tone={t.kind === 'device' ? 'primary' : 'warn'}>{t.kind === 'device' ? 'Cihaz' : 'Ortak'}</Badge>
+                  <Badge tone={t.kind === 'device' ? 'primary' : 'warn'}>{t.kind === 'device' ? 'Cihaz' : 'Watchlist'}</Badge>
                 </button>
               );
             })}
@@ -495,11 +493,13 @@ function BindModal({
           onChange={(e) => setCode(e.target.value)} placeholder="ABC123" maxLength={8} autoFocus required />
         <label className="label mt-4">Cihaz adı</label>
         <input className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder="Bekleme salonu TV" required />
-        <label className="label mt-4">Ortak galeri (opsiyonel)</label>
-        <select className="input" value={sharedGalleryId} onChange={(e) => setShared(e.target.value)}>
-          <option value="">— Yok —</option>
-          {sharedGalleries.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
-        </select>
+        <label className="label mt-4">Watchlist (opsiyonel)</label>
+        <Select
+          value={sharedGalleryId}
+          placeholder="— Yok —"
+          options={[{ value: '', label: '— Yok —' }, ...sharedGalleries.map((g) => ({ value: g.id, label: g.name }))]}
+          onChange={setShared}
+        />
         <div className="mt-6 flex justify-end gap-2">
           <Button type="button" variant="ghost" onClick={onClose}>İptal</Button>
           <Button variant="primary" loading={busy}>Bağla</Button>

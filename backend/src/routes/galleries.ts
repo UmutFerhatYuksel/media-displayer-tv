@@ -46,15 +46,17 @@ galleryRouter.post('/assign', async (req, res) => {
       where: { id: { in: mediaIds }, clinicId: g.clinicId },
       select: { id: true },
     });
-    const validIds = valid.map((m) => m.id);
-    if (validIds.length === 0) continue;
+    const validSet = new Set(valid.map((m) => m.id));
+    if (validSet.size === 0) continue;
 
     const existing = await prisma.galleryItem.findMany({
-      where: { galleryId: g.id, mediaItemId: { in: validIds } },
+      where: { galleryId: g.id, mediaItemId: { in: [...validSet] } },
       select: { mediaItemId: true },
     });
     const has = new Set(existing.map((e) => e.mediaItemId));
-    const toAdd = validIds.filter((id) => !has.has(id));
+    // Kullanıcının seçtiği SIRAYI koru — Postgres `IN` sırayı garanti etmez, bu yüzden
+    // istek gövdesindeki mediaIds sırasını esas al (eski hali DB sırasına göre eklerdi → karışık).
+    const toAdd = mediaIds.filter((id) => validSet.has(id) && !has.has(id));
     if (toAdd.length === 0) continue;
 
     let pos = await nextPosition(g.id);
@@ -101,10 +103,8 @@ galleryRouter.get('/:id', async (req, res) => {
         tickerBgOpacity: it.tickerBgOpacity,
         overlayImageId: it.overlayImageId,
         overlayImageUrl: it.overlayImage?.r2Key ? await signedGetUrl(it.overlayImage.r2Key, URL_TTL) : null,
-        overlayX: it.overlayX,
-        overlayY: it.overlayY,
-        overlayW: it.overlayW,
-        overlayH: it.overlayH,
+        overlaySide: it.overlaySide,
+        overlaySize: it.overlaySize,
       };
     }),
   );
@@ -213,10 +213,8 @@ const overlayBody = z.object({
   tickerBgColor: hexColor.nullable().optional(),
   tickerBgOpacity: frac.optional(),
   overlayImageId: z.string().min(1).nullable().optional(),
-  overlayX: frac.optional(),
-  overlayY: frac.optional(),
-  overlayW: frac.optional(),
-  overlayH: frac.optional(),
+  overlaySide: z.enum(['left', 'right', 'top', 'bottom']).optional(),
+  overlaySize: z.number().min(0.05).max(0.6).optional(), // şerit kalınlığı (0..1)
 });
 
 // Bir galeri öğesine overlay (kayan yazı + banner görseli + konum) tanımla/güncelle.

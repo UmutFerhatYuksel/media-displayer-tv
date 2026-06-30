@@ -121,13 +121,13 @@ model GalleryItem {
   tickerOpacity  Float?     @default(1)         // kayan yazı opaklığı (0..1)
   tickerBgColor  String?    @default("#000000") // kayan yazı şeridi arka plan rengi (hex)
   tickerBgOpacity Float?    @default(0.6)       // kayan yazı şeridi opaklığı (0..1)
-  // Reklam/banner görseli (havuzdan bir IMAGE). Konum/boyut ekran oranına göre 0..1.
+  // Reklam görseli (havuzdan bir IMAGE) — videoyu kapatmaz, bir kenara yerleşir ve
+  // içeriği o kadar küçültür ("squeeze-back"). side: hangi kenar; size: o kenarın
+  // kapladığı ekran oranı (0..1).
   overlayImageId String?
   overlayImage   MediaItem? @relation("ItemOverlay", fields: [overlayImageId], references: [id], onDelete: SetNull)
-  overlayX       Float?     @default(0.72) // sol kenar (0..1)
-  overlayY       Float?     @default(0.72) // üst kenar (0..1)
-  overlayW       Float?     @default(0.22) // genişlik (ekran genişliğinin oranı)
-  overlayH       Float?     @default(0.18) // yükseklik (ekran yüksekliğinin oranı)
+  overlaySide    String?    @default("right") // left | right | top | bottom
+  overlaySize    Float?     @default(0.25)     // şerit kalınlığı (ekran oranı, 0..1)
 
   @@unique([galleryId, mediaItemId])
   @@index([galleryId, position])

@@ -1,6 +1,6 @@
-import { useEffect, type ButtonHTMLAttributes, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ButtonHTMLAttributes, type ReactNode } from 'react';
 import { clsx } from 'clsx';
-import { X, Loader2 } from 'lucide-react';
+import { X, Loader2, ChevronDown, Check } from 'lucide-react';
 
 type Variant = 'default' | 'primary' | 'danger' | 'ghost';
 
@@ -37,6 +37,75 @@ export function Button({
 
 export function Card({ className, children }: { className?: string; children: ReactNode }) {
   return <div className={clsx('card', className)}>{children}</div>;
+}
+
+// Tema uyumlu özel dropdown (native <select> yerine — açılır liste de koyu temada).
+export function Select({
+  value,
+  onChange,
+  options,
+  placeholder = 'Seçin',
+  className,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  options: { value: string; label: string }[];
+  placeholder?: string;
+  className?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && setOpen(false);
+    document.addEventListener('mousedown', onDoc);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDoc);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
+  const selected = options.find((o) => o.value === value);
+  return (
+    <div ref={ref} className={clsx('relative', className)}>
+      <button
+        type="button"
+        className="input flex items-center justify-between gap-2 text-left"
+        onClick={() => setOpen((o) => !o)}
+      >
+        <span className={clsx('truncate', !selected && 'text-muted/60')}>
+          {selected ? selected.label : placeholder}
+        </span>
+        <ChevronDown size={16} className={clsx('shrink-0 text-muted transition', open && 'rotate-180')} />
+      </button>
+      {open && (
+        <div className="absolute z-40 mt-1.5 max-h-60 w-full animate-fade-in overflow-auto rounded-xl border border-border bg-surface p-1 shadow-card">
+          {options.length === 0 && (
+            <div className="px-3 py-2 text-sm text-muted/70">Seçenek yok</div>
+          )}
+          {options.map((o) => (
+            <button
+              key={o.value}
+              type="button"
+              className={clsx(
+                'flex w-full items-center justify-between gap-2 rounded-lg px-3 py-2 text-left text-sm transition hover:bg-surface-2',
+                o.value === value ? 'text-primary' : 'text-text',
+              )}
+              onClick={() => { onChange(o.value); setOpen(false); }}
+            >
+              <span className="truncate">{o.label}</span>
+              {o.value === value && <Check size={14} className="shrink-0 text-primary" />}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 export function Badge({

@@ -128,11 +128,11 @@ export interface GalleryItem {
   tickerBgOpacity?: number | null;
   overlayImageId?: string | null;
   overlayImageUrl?: string | null;
-  overlayX?: number | null;
-  overlayY?: number | null;
-  overlayW?: number | null;
-  overlayH?: number | null;
+  overlaySide?: OverlaySide | null;
+  overlaySize?: number | null;
 }
+
+export type OverlaySide = 'left' | 'right' | 'top' | 'bottom';
 
 export interface OverlayPatch {
   tickerText?: string | null;
@@ -141,10 +141,8 @@ export interface OverlayPatch {
   tickerBgColor?: string | null;
   tickerBgOpacity?: number;
   overlayImageId?: string | null;
-  overlayX?: number;
-  overlayY?: number;
-  overlayW?: number;
-  overlayH?: number;
+  overlaySide?: OverlaySide;
+  overlaySize?: number;
 }
 export const setItemOverlay = (galleryId: string, itemId: string, body: OverlayPatch) =>
   req<{ ok: true }>(`/galleries/${galleryId}/items/${itemId}/overlay`, {
